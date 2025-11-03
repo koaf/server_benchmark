@@ -63,6 +63,12 @@ class BenchmarkRunner:
     def __init__(self):
         self.results = {}
         self.running = False
+        self.progress = {
+            "current_test": "",
+            "progress": 0,
+            "total_tests": 5,
+            "message": ""
+        }
     
     def get_system_info(self):
         """システム情報を取得"""
@@ -89,6 +95,8 @@ class BenchmarkRunner:
     
     def run_cpu_benchmark(self):
         """CPU ベンチマーク (sysbench使用)"""
+        self.progress["current_test"] = "CPU"
+        self.progress["message"] = "Testing CPU performance..."
         print("Running CPU benchmark...")
         try:
             result = subprocess.run(
@@ -100,18 +108,25 @@ class BenchmarkRunner:
             for line in output.split("\n"):
                 if "events per second:" in line:
                     eps = float(line.split(":")[1].strip())
+                    self.progress["progress"] += 1
                     return {"events_per_second": eps, "status": "completed"}
             
+            self.progress["progress"] += 1
             return {"events_per_second": 0, "status": "completed"}
         except subprocess.TimeoutExpired:
+            self.progress["progress"] += 1
             return {"error": "Timeout", "status": "error"}
         except FileNotFoundError:
+            self.progress["progress"] += 1
             return {"error": "sysbench not installed", "status": "error"}
         except Exception as e:
+            self.progress["progress"] += 1
             return {"error": str(e), "status": "error"}
     
     def run_memory_benchmark(self):
         """メモリ ベンチマーク"""
+        self.progress["current_test"] = "Memory"
+        self.progress["message"] = "Testing memory throughput..."
         print("Running memory benchmark...")
         try:
             result = subprocess.run(
@@ -124,59 +139,137 @@ class BenchmarkRunner:
             for line in output.split("\n"):
                 if "MiB/sec" in line and "transferred" in line:
                     parts = line.split("(")[1].split("MiB/sec")[0].strip()
+                    self.progress["progress"] += 1
                     return {"throughput_mib_per_sec": float(parts), "status": "completed"}
             
+            self.progress["progress"] += 1
             return {"throughput_mib_per_sec": 0, "status": "completed"}
         except subprocess.TimeoutExpired:
+            self.progress["progress"] += 1
             return {"error": "Timeout", "status": "error"}
         except FileNotFoundError:
+            self.progress["progress"] += 1
             return {"error": "sysbench not installed", "status": "error"}
         except Exception as e:
+            self.progress["progress"] += 1
             return {"error": str(e), "status": "error"}
     
     def run_disk_benchmark(self):
         """ディスク ベンチマーク"""
+        self.progress["current_test"] = "Disk"
+        self.progress["message"] = "Preparing test files..."
         print("Running disk benchmark...")
         try:
-            subprocess.run(
+            print("Preparing test files...")
+            prep_result = subprocess.run(
                 ["sysbench", "fileio", "--file-total-size=2G", "prepare"],
-                capture_output=True, timeout=30
+                capture_output=True, text=True, timeout=30
             )
             
+            self.progress["message"] = "Testing disk I/O performance..."
+            print("Running fileio test...")
             result = subprocess.run(
                 ["sysbench", "fileio", "--file-total-size=2G", 
                  "--file-test-mode=rndrw", "--time=10", "run"],
                 capture_output=True, text=True, timeout=30
             )
             
+            output = result.stdout
+            
+            self.progress["message"] = "Cleaning up test files..."
             subprocess.run(
                 ["sysbench", "fileio", "--file-total-size=2G", "cleanup"],
                 capture_output=True, timeout=10
             )
             
-            output = result.stdout
             read_mib = write_mib = 0
             
             for line in output.split("\n"):
-                if "read, MiB/s:" in line:
-                    read_mib = float(line.split(":")[1].strip())
-                elif "written, MiB/s:" in line:
-                    write_mib = float(line.split(":")[1].strip())
+                line_lower = line.lower()
+                
+                if "read, mib/s:" in line_lower:
+                    try:
+                        read_mib = float(line.split(":")[1].strip())
+                    except:
+                        pass
+                elif "written, mib/s:" in line_lower:
+                    try:
+                        write_mib = float(line.split(":")[1].strip())
+                    except:
+                        pass
+                elif "read" in line_lower and ("mb/sec" in line_lower or "mb/s" in line_lower):
+                    try:
+                        parts = line.split()
+                        for i, part in enumerate(parts):
+                            if "mb" in part.lower() and i > 0:
+                                read_mb = float(parts[i-1])
+                                read_mib = read_mb * 0.9537
+                                break
+                    except:
+                        pass
+                elif "written" in line_lower and ("mb/sec" in line_lower or "mb/s" in line_lower):
+                    try:
+                        parts = line.split()
+                        for i, part in enumerate(parts):
+                            if "mb" in part.lower() and i > 0:
+                                write_mb = float(parts[i-1])
+                                write_mib = write_mb * 0.9537
+                                break
+                    except:
+                        pass
             
+            if read_mib == 0 and write_mib == 0:
+                print("Sysbench format not recognized, trying dd command...")
+                self.progress["message"] = "Using fallback dd test..."
+                try:
+                    dd_write = subprocess.run(
+                        ["dd", "if=/dev/zero", "of=/tmp/benchmark_test", 
+                         "bs=1M", "count=1024", "conv=fdatasync"],
+                        capture_output=True, text=True, timeout=30
+                    )
+                    for line in dd_write.stderr.split("\n"):
+                        if "bytes" in line and "copied" in line:
+                            parts = line.split(",")
+                            for part in parts:
+                                if "mb/s" in part.lower() or "gb/s" in part.lower():
+                                    speed_str = part.strip().split()[0]
+                                    write_mib = float(speed_str)
+                                    break
+                    
+                    dd_read = subprocess.run(
+                        ["dd", "if=/tmp/benchmark_test", "of=/dev/null", "bs=1M"],
+                        capture_output=True, text=True, timeout=30
+                    )
+                    for line in dd_read.stderr.split("\n"):
+                        if "bytes" in line and "copied" in line:
+                            parts = line.split(",")
+                            for part in parts:
+                                if "mb/s" in part.lower() or "gb/s" in part.lower():
+                                    speed_str = part.strip().split()[0]
+                                    read_mib = float(speed_str)
+                                    break
+                    
+                    subprocess.run(["rm", "-f", "/tmp/benchmark_test"], capture_output=True)
+                except Exception as e:
+                    print(f"DD benchmark failed: {e}")
+            
+            self.progress["progress"] += 1
             return {
                 "read_mib_per_sec": read_mib,
                 "write_mib_per_sec": write_mib,
                 "status": "completed"
             }
         except Exception as e:
+            self.progress["progress"] += 1
             return {"error": str(e), "status": "error"}
     
     def run_network_benchmark(self):
         """ネットワーク ベンチマーク"""
+        self.progress["current_test"] = "Network"
+        self.progress["message"] = "Testing network performance..."
         print("Running network benchmark...")
         results = {}
         
-        # 基本的なネットワーク情報
         try:
             net_io = psutil.net_io_counters()
             results["total_bytes_sent_gb"] = round(net_io.bytes_sent / (1024**3), 2)
@@ -184,21 +277,18 @@ class BenchmarkRunner:
         except:
             pass
         
-        # iperf3でスループット測定（サーバーモード）
         try:
-            # 一時的にiperf3サーバーを起動して自己測定
+            self.progress["message"] = "Testing network throughput with iperf3..."
             print("Testing network throughput with iperf3...")
             
-            # ローカルループバックでのスループット測定
             server_proc = subprocess.Popen(
                 ["iperf3", "-s", "-1"],
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE
             )
             
-            time.sleep(1)  # サーバー起動待ち
+            time.sleep(1)
             
-            # クライアントとして接続
             result = subprocess.run(
                 ["iperf3", "-c", "127.0.0.1", "-t", "5", "-J"],
                 capture_output=True,
@@ -212,11 +302,9 @@ class BenchmarkRunner:
                 import json as json_lib
                 data = json_lib.loads(result.stdout)
                 
-                # 送信スループット (bits/sec to Mbps)
                 send_bps = data["end"]["sum_sent"]["bits_per_second"]
                 results["throughput_send_mbps"] = round(send_bps / 1000000, 2)
                 
-                # 受信スループット
                 recv_bps = data["end"]["sum_received"]["bits_per_second"]
                 results["throughput_recv_mbps"] = round(recv_bps / 1000000, 2)
         except subprocess.TimeoutExpired:
@@ -226,10 +314,9 @@ class BenchmarkRunner:
         except Exception as e:
             results["throughput_error"] = str(e)
         
-        # pingでレイテンシ測定（ローカルゲートウェイ）
         try:
+            self.progress["message"] = "Testing network latency..."
             print("Testing network latency...")
-            # デフォルトゲートウェイを取得
             gw_result = subprocess.run(
                 ["ip", "route", "show", "default"],
                 capture_output=True,
@@ -240,7 +327,6 @@ class BenchmarkRunner:
             if gw_result.returncode == 0:
                 gateway = gw_result.stdout.split()[2]
                 
-                # ping実行
                 ping_result = subprocess.run(
                     ["ping", "-c", "10", "-q", gateway],
                     capture_output=True,
@@ -250,7 +336,6 @@ class BenchmarkRunner:
                 
                 if ping_result.returncode == 0:
                     output = ping_result.stdout
-                    # rtt min/avg/max/mdev = 0.123/0.234/0.345/0.012 ms
                     for line in output.split("\n"):
                         if "rtt min/avg/max" in line or "round-trip min/avg/max" in line:
                             stats = line.split("=")[1].strip().split()[0]
@@ -263,8 +348,8 @@ class BenchmarkRunner:
         except Exception as e:
             results["latency_error"] = str(e)
         
-        # DNS解決速度テスト
         try:
+            self.progress["message"] = "Testing DNS resolution speed..."
             print("Testing DNS resolution speed...")
             import socket
             test_domains = ["google.com", "github.com", "cloudflare.com"]
@@ -273,7 +358,7 @@ class BenchmarkRunner:
             for domain in test_domains:
                 start = time.time()
                 socket.gethostbyname(domain)
-                dns_times.append((time.time() - start) * 1000)  # ms
+                dns_times.append((time.time() - start) * 1000)
             
             results["dns_avg_ms"] = round(sum(dns_times) / len(dns_times), 2)
             results["dns_min_ms"] = round(min(dns_times), 2)
@@ -281,12 +366,20 @@ class BenchmarkRunner:
         except Exception as e:
             results["dns_error"] = str(e)
         
+        self.progress["progress"] += 1
         results["status"] = "completed"
         return results
     
     def run_all_benchmarks(self, custom_name=None):
         """全ベンチマークを実行"""
         self.running = True
+        self.progress = {
+            "current_test": "Starting",
+            "progress": 0,
+            "total_tests": 5,
+            "message": "Initializing benchmark..."
+        }
+        
         self.results = {
             "system_info": self.get_system_info(),
             "benchmarks": {}
@@ -295,10 +388,15 @@ class BenchmarkRunner:
         if custom_name:
             self.results["custom_name"] = custom_name
         
+        self.progress["progress"] = 1
         self.results["benchmarks"]["cpu"] = self.run_cpu_benchmark()
         self.results["benchmarks"]["memory"] = self.run_memory_benchmark()
         self.results["benchmarks"]["disk"] = self.run_disk_benchmark()
         self.results["benchmarks"]["network"] = self.run_network_benchmark()
+        
+        self.progress["current_test"] = "Completed"
+        self.progress["progress"] = 5
+        self.progress["message"] = "All benchmarks completed!"
         
         self.results["completed_at"] = datetime.now().isoformat()
         self.running = False
@@ -341,7 +439,8 @@ class BenchmarkHTTPHandler(BaseHTTPRequestHandler):
             
             response = {
                 "running": self.benchmark_runner.running,
-                "results": self.benchmark_runner.results
+                "results": self.benchmark_runner.results,
+                "progress": self.benchmark_runner.progress
             }
             self.wfile.write(json.dumps(response).encode())
         
@@ -503,18 +602,54 @@ class BenchmarkHTTPHandler(BaseHTTPRequestHandler):
             background: #d4edda;
             color: #155724;
         }
-        .spinner {
-            border: 4px solid #f3f3f3;
-            border-top: 4px solid #4CAF50;
-            border-radius: 50%;
-            width: 40px;
-            height: 40px;
-            animation: spin 1s linear infinite;
-            margin: 20px auto;
+        .progress-container {
+            background: white;
+            border-radius: 8px;
+            padding: 20px;
+            margin: 20px 0;
+            box-shadow: 0 2px 10px rgba(0,0,0,0.1);
         }
-        @keyframes spin {
-            0% { transform: rotate(0deg); }
-            100% { transform: rotate(360deg); }
+        .progress-bar {
+            width: 100%;
+            height: 30px;
+            background: #f0f0f0;
+            border-radius: 15px;
+            overflow: hidden;
+            position: relative;
+            margin: 15px 0;
+        }
+        .progress-fill {
+            height: 100%;
+            background: linear-gradient(90deg, #4CAF50, #45a049);
+            transition: width 0.3s ease;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            color: white;
+            font-weight: bold;
+        }
+        .progress-text {
+            text-align: center;
+            color: #666;
+            font-size: 14px;
+            margin-top: 10px;
+        }
+        .test-status {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 10px;
+            background: #f9f9f9;
+            border-radius: 5px;
+            margin-bottom: 10px;
+        }
+        .test-name {
+            font-weight: bold;
+            color: #333;
+        }
+        .test-message {
+            color: #666;
+            font-size: 14px;
         }
         .comparison-table {
             background: white;
@@ -559,11 +694,6 @@ class BenchmarkHTTPHandler(BaseHTTPRequestHandler):
         .metric-value {
             font-size: 16px;
             color: #333;
-        }
-        .metric-unit {
-            font-size: 12px;
-            color: #666;
-            margin-left: 5px;
         }
         .action-btn {
             padding: 6px 12px;
@@ -614,7 +744,7 @@ class BenchmarkHTTPHandler(BaseHTTPRequestHandler):
             const serverName = document.getElementById('serverName').value.trim();
             
             document.getElementById('status').innerHTML = 
-                '<div class="status running">🔄 Running benchmarks...</div><div class="spinner"></div>';
+                '<div class="status running">🔄 Running benchmarks...</div>';
             
             fetch('/api/save', {
                 method: 'POST',
@@ -636,10 +766,15 @@ class BenchmarkHTTPHandler(BaseHTTPRequestHandler):
                 fetch('/api/status')
                     .then(response => response.json())
                     .then(data => {
+                        if (data.running && data.progress) {
+                            updateProgress(data.progress);
+                        }
+                        
                         if (!data.running && data.results.completed_at) {
                             clearInterval(pollInterval);
+                            displayResults(data.results);
                             document.getElementById('status').innerHTML = 
-                                '<div class="status completed">✅ Benchmark completed and saved!</div>';
+                                '<div class="status completed">✅ Benchmark completed!</div>';
                             setTimeout(() => {
                                 loadHistory();
                                 document.getElementById('serverName').value = '';
@@ -647,6 +782,27 @@ class BenchmarkHTTPHandler(BaseHTTPRequestHandler):
                         }
                     });
             }, 1000);
+        }
+
+        function updateProgress(progress) {
+            const percentage = (progress.progress / progress.total_tests) * 100;
+            const statusHtml = `
+                <div class="progress-container">
+                    <div class="test-status">
+                        <span class="test-name">Current Test: ${progress.current_test}</span>
+                        <span>${progress.progress} / ${progress.total_tests}</span>
+                    </div>
+                    <div class="progress-bar">
+                        <div class="progress-fill" style="width: ${percentage}%">
+                            ${Math.round(percentage)}%
+                        </div>
+                    </div>
+                    <div class="progress-text">
+                        ${progress.message}
+                    </div>
+                </div>
+            `;
+            document.getElementById('status').innerHTML = statusHtml;
         }
 
         function loadHistory() {
@@ -669,11 +825,16 @@ class BenchmarkHTTPHandler(BaseHTTPRequestHandler):
                 return;
             }
 
-            // 最高スコアを計算
             const maxCPU = Math.max(...servers.map(s => s.benchmarks?.cpu?.events_per_second || 0));
             const maxMemory = Math.max(...servers.map(s => s.benchmarks?.memory?.throughput_mib_per_sec || 0));
             const maxDiskRead = Math.max(...servers.map(s => s.benchmarks?.disk?.read_mib_per_sec || 0));
             const maxDiskWrite = Math.max(...servers.map(s => s.benchmarks?.disk?.write_mib_per_sec || 0));
+            const maxNetworkThroughput = Math.max(...servers.map(s => {
+                const net = s.benchmarks?.network;
+                return Math.max(net?.throughput_send_mbps || 0, net?.throughput_recv_mbps || 0);
+            }));
+            const minLatency = Math.min(...servers.filter(s => s.benchmarks?.network?.latency_avg_ms).map(s => s.benchmarks.network.latency_avg_ms));
+            const minDNS = Math.min(...servers.filter(s => s.benchmarks?.network?.dns_avg_ms).map(s => s.benchmarks.network.dns_avg_ms));
 
             let html = '<table><thead><tr>';
             html += '<th>Server Name</th>';
@@ -684,6 +845,9 @@ class BenchmarkHTTPHandler(BaseHTTPRequestHandler):
             html += '<th>Memory Throughput<br><span style="font-weight:normal; font-size:11px">(MiB/s)</span></th>';
             html += '<th>Disk Read<br><span style="font-weight:normal; font-size:11px">(MiB/s)</span></th>';
             html += '<th>Disk Write<br><span style="font-weight:normal; font-size:11px">(MiB/s)</span></th>';
+            html += '<th>Network Throughput<br><span style="font-weight:normal; font-size:11px">(Mbps)</span></th>';
+            html += '<th>Latency<br><span style="font-weight:normal; font-size:11px">(ms)</span></th>';
+            html += '<th>DNS<br><span style="font-weight:normal; font-size:11px">(ms)</span></th>';
             html += '<th>Tested At</th>';
             html += '<th>Action</th>';
             html += '</tr></thead><tbody>';
@@ -697,6 +861,9 @@ class BenchmarkHTTPHandler(BaseHTTPRequestHandler):
                 const memScore = bench?.memory?.throughput_mib_per_sec || 0;
                 const diskRead = bench?.disk?.read_mib_per_sec || 0;
                 const diskWrite = bench?.disk?.write_mib_per_sec || 0;
+                const networkThroughput = Math.max(bench?.network?.throughput_send_mbps || 0, bench?.network?.throughput_recv_mbps || 0);
+                const latency = bench?.network?.latency_avg_ms;
+                const dns = bench?.network?.dns_avg_ms;
 
                 html += '<tr>';
                 html += `<td><div class="server-name">${displayName}</div><div class="server-specs">${info.hostname}</div></td>`;
@@ -709,6 +876,35 @@ class BenchmarkHTTPHandler(BaseHTTPRequestHandler):
                 html += `<td class="${diskRead === maxDiskRead ? 'best-score' : ''}"><span class="metric-value">${diskRead.toFixed(2)}</span></td>`;
                 html += `<td class="${diskWrite === maxDiskWrite ? 'best-score' : ''}"><span class="metric-value">${diskWrite.toFixed(2)}</span></td>`;
                 
+                if (networkThroughput > 0) {
+                    html += `<td class="${networkThroughput === maxNetworkThroughput ? 'best-score' : ''}">`;
+                    html += `<span class="metric-value">${networkThroughput.toFixed(2)}</span>`;
+                    if (bench?.network?.throughput_send_mbps && bench?.network?.throughput_recv_mbps) {
+                        html += `<br><span style="font-size:10px; color:#666">↑${bench.network.throughput_send_mbps.toFixed(0)} / ↓${bench.network.throughput_recv_mbps.toFixed(0)}</span>`;
+                    }
+                    html += `</td>`;
+                } else {
+                    html += `<td><span style="color:#999; font-size:12px">${bench?.network?.throughput_error || 'N/A'}</span></td>`;
+                }
+                
+                if (latency) {
+                    html += `<td class="${latency === minLatency ? 'best-score' : ''}">`;
+                    html += `<span class="metric-value">${latency.toFixed(2)}</span>`;
+                    html += `<br><span style="font-size:10px; color:#666">${bench.network.latency_min_ms.toFixed(2)}-${bench.network.latency_max_ms.toFixed(2)}</span>`;
+                    html += `</td>`;
+                } else {
+                    html += `<td><span style="color:#999; font-size:12px">${bench?.network?.latency_error || 'N/A'}</span></td>`;
+                }
+                
+                if (dns) {
+                    html += `<td class="${dns === minDNS ? 'best-score' : ''}">`;
+                    html += `<span class="metric-value">${dns.toFixed(2)}</span>`;
+                    html += `<br><span style="font-size:10px; color:#666">${bench.network.dns_min_ms.toFixed(2)}-${bench.network.dns_max_ms.toFixed(2)}</span>`;
+                    html += `</td>`;
+                } else {
+                    html += `<td><span style="color:#999; font-size:12px">${bench?.network?.dns_error || 'N/A'}</span></td>`;
+                }
+                
                 const date = new Date(server.timestamp);
                 html += `<td style="font-size: 12px;">${date.toLocaleString()}</td>`;
                 html += `<td><button class="action-btn" onclick="deleteResult('${server.id}')">Delete</button></td>`;
@@ -717,6 +913,10 @@ class BenchmarkHTTPHandler(BaseHTTPRequestHandler):
 
             html += '</tbody></table>';
             document.getElementById('resultsTable').innerHTML = html;
+        }
+
+        function displayResults(data) {
+            // 完了後に履歴をリロード
         }
 
         function deleteResult(id) {
@@ -740,7 +940,6 @@ class BenchmarkHTTPHandler(BaseHTTPRequestHandler):
             .then(() => loadHistory());
         }
 
-        // 初期ロード
         loadHistory();
     </script>
 </body>
@@ -758,7 +957,6 @@ def main():
                        help="Database file path")
     args = parser.parse_args()
     
-    # データベース初期化
     BenchmarkHTTPHandler.database = BenchmarkDatabase(args.db)
     
     print("=" * 60)
