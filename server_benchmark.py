@@ -138,122 +138,35 @@ class BenchmarkRunner:
         """ディスク ベンチマーク"""
         print("Running disk benchmark...")
         try:
-            # 準備
-            print("Preparing test files...")
-            prep_result = subprocess.run(
+            subprocess.run(
                 ["sysbench", "fileio", "--file-total-size=2G", "prepare"],
-                capture_output=True, text=True, timeout=30
+                capture_output=True, timeout=30
             )
-            print(f"Prepare output: {prep_result.stdout[:200]}")
             
-            # 実行
-            print("Running fileio test...")
             result = subprocess.run(
                 ["sysbench", "fileio", "--file-total-size=2G", 
                  "--file-test-mode=rndrw", "--time=10", "run"],
                 capture_output=True, text=True, timeout=30
             )
             
-            output = result.stdout
-            print(f"Benchmark output:\n{output}")
-            
-            # クリーンアップ
             subprocess.run(
                 ["sysbench", "fileio", "--file-total-size=2G", "cleanup"],
                 capture_output=True, timeout=10
             )
             
+            output = result.stdout
             read_mib = write_mib = 0
-            read_mb = write_mb = 0
             
-            # 複数の出力フォーマットに対応
             for line in output.split("\n"):
-                line_lower = line.lower()
-                
-                # 新しいフォーマット: "read, MiB/s:" または "reads/s:"
-                if "read, mib/s:" in line_lower:
-                    try:
-                        read_mib = float(line.split(":")[1].strip())
-                    except:
-                        pass
-                elif "written, mib/s:" in line_lower:
-                    try:
-                        write_mib = float(line.split(":")[1].strip())
-                    except:
-                        pass
-                # 古いフォーマット: "Read 123.45Mb/sec"
-                elif "read" in line_lower and ("mb/sec" in line_lower or "mb/s" in line_lower):
-                    try:
-                        parts = line.split()
-                        for i, part in enumerate(parts):
-                            if "mb" in part.lower() and i > 0:
-                                read_mb = float(parts[i-1])
-                                read_mib = read_mb * 0.9537  # MB to MiB
-                                break
-                    except:
-                        pass
-                elif "written" in line_lower and ("mb/sec" in line_lower or "mb/s" in line_lower):
-                    try:
-                        parts = line.split()
-                        for i, part in enumerate(parts):
-                            if "mb" in part.lower() and i > 0:
-                                write_mb = float(parts[i-1])
-                                write_mib = write_mb * 0.9537  # MB to MiB
-                                break
-                    except:
-                        pass
-                # さらに別のフォーマット: "reads: 1234 (12.34 per sec)"
-                elif "reads:" in line_lower or "writes:" in line_lower:
-                    try:
-                        if "reads:" in line_lower and "per sec" in line_lower:
-                            # This format doesn't give us MB/s directly
-                            pass
-                    except:
-                        pass
-            
-            # もし値が取得できなかった場合、ddコマンドで簡易測定
-            if read_mib == 0 and write_mib == 0:
-                print("Sysbench format not recognized, trying dd command...")
-                try:
-                    # 書き込み速度測定
-                    dd_write = subprocess.run(
-                        ["dd", "if=/dev/zero", "of=/tmp/benchmark_test", 
-                         "bs=1M", "count=1024", "conv=fdatasync"],
-                        capture_output=True, text=True, timeout=30
-                    )
-                    for line in dd_write.stderr.split("\n"):
-                        if "bytes" in line and "copied" in line:
-                            parts = line.split(",")
-                            for part in parts:
-                                if "mb/s" in part.lower() or "gb/s" in part.lower():
-                                    speed_str = part.strip().split()[0]
-                                    write_mib = float(speed_str)
-                                    break
-                    
-                    # 読み込み速度測定
-                    dd_read = subprocess.run(
-                        ["dd", "if=/tmp/benchmark_test", "of=/dev/null", "bs=1M"],
-                        capture_output=True, text=True, timeout=30
-                    )
-                    for line in dd_read.stderr.split("\n"):
-                        if "bytes" in line and "copied" in line:
-                            parts = line.split(",")
-                            for part in parts:
-                                if "mb/s" in part.lower() or "gb/s" in part.lower():
-                                    speed_str = part.strip().split()[0]
-                                    read_mib = float(speed_str)
-                                    break
-                    
-                    # クリーンアップ
-                    subprocess.run(["rm", "-f", "/tmp/benchmark_test"], capture_output=True)
-                except Exception as e:
-                    print(f"DD benchmark failed: {e}")
+                if "read, MiB/s:" in line:
+                    read_mib = float(line.split(":")[1].strip())
+                elif "written, MiB/s:" in line:
+                    write_mib = float(line.split(":")[1].strip())
             
             return {
                 "read_mib_per_sec": read_mib,
                 "write_mib_per_sec": write_mib,
-                "status": "completed",
-                "raw_output": output[:500]  # デバッグ用
+                "status": "completed"
             }
         except Exception as e:
             return {"error": str(e), "status": "error"}
@@ -761,12 +674,6 @@ class BenchmarkHTTPHandler(BaseHTTPRequestHandler):
             const maxMemory = Math.max(...servers.map(s => s.benchmarks?.memory?.throughput_mib_per_sec || 0));
             const maxDiskRead = Math.max(...servers.map(s => s.benchmarks?.disk?.read_mib_per_sec || 0));
             const maxDiskWrite = Math.max(...servers.map(s => s.benchmarks?.disk?.write_mib_per_sec || 0));
-            const maxNetworkThroughput = Math.max(...servers.map(s => {
-                const net = s.benchmarks?.network;
-                return Math.max(net?.throughput_send_mbps || 0, net?.throughput_recv_mbps || 0);
-            }));
-            const minLatency = Math.min(...servers.filter(s => s.benchmarks?.network?.latency_avg_ms).map(s => s.benchmarks.network.latency_avg_ms));
-            const minDNS = Math.min(...servers.filter(s => s.benchmarks?.network?.dns_avg_ms).map(s => s.benchmarks.network.dns_avg_ms));
 
             let html = '<table><thead><tr>';
             html += '<th>Server Name</th>';
@@ -777,9 +684,6 @@ class BenchmarkHTTPHandler(BaseHTTPRequestHandler):
             html += '<th>Memory Throughput<br><span style="font-weight:normal; font-size:11px">(MiB/s)</span></th>';
             html += '<th>Disk Read<br><span style="font-weight:normal; font-size:11px">(MiB/s)</span></th>';
             html += '<th>Disk Write<br><span style="font-weight:normal; font-size:11px">(MiB/s)</span></th>';
-            html += '<th>Network Throughput<br><span style="font-weight:normal; font-size:11px">(Mbps)</span></th>';
-            html += '<th>Latency<br><span style="font-weight:normal; font-size:11px">(ms)</span></th>';
-            html += '<th>DNS<br><span style="font-weight:normal; font-size:11px">(ms)</span></th>';
             html += '<th>Tested At</th>';
             html += '<th>Action</th>';
             html += '</tr></thead><tbody>';
@@ -793,9 +697,6 @@ class BenchmarkHTTPHandler(BaseHTTPRequestHandler):
                 const memScore = bench?.memory?.throughput_mib_per_sec || 0;
                 const diskRead = bench?.disk?.read_mib_per_sec || 0;
                 const diskWrite = bench?.disk?.write_mib_per_sec || 0;
-                const networkThroughput = Math.max(bench?.network?.throughput_send_mbps || 0, bench?.network?.throughput_recv_mbps || 0);
-                const latency = bench?.network?.latency_avg_ms;
-                const dns = bench?.network?.dns_avg_ms;
 
                 html += '<tr>';
                 html += `<td><div class="server-name">${displayName}</div><div class="server-specs">${info.hostname}</div></td>`;
@@ -807,38 +708,6 @@ class BenchmarkHTTPHandler(BaseHTTPRequestHandler):
                 html += `<td class="${memScore === maxMemory ? 'best-score' : ''}"><span class="metric-value">${memScore.toFixed(2)}</span></td>`;
                 html += `<td class="${diskRead === maxDiskRead ? 'best-score' : ''}"><span class="metric-value">${diskRead.toFixed(2)}</span></td>`;
                 html += `<td class="${diskWrite === maxDiskWrite ? 'best-score' : ''}"><span class="metric-value">${diskWrite.toFixed(2)}</span></td>`;
-                
-                // ネットワークスループット
-                if (networkThroughput > 0) {
-                    html += `<td class="${networkThroughput === maxNetworkThroughput ? 'best-score' : ''}">`;
-                    html += `<span class="metric-value">${networkThroughput.toFixed(2)}</span>`;
-                    if (bench?.network?.throughput_send_mbps && bench?.network?.throughput_recv_mbps) {
-                        html += `<br><span style="font-size:10px; color:#666">↑${bench.network.throughput_send_mbps.toFixed(0)} / ↓${bench.network.throughput_recv_mbps.toFixed(0)}</span>`;
-                    }
-                    html += `</td>`;
-                } else {
-                    html += `<td><span style="color:#999; font-size:12px">${bench?.network?.throughput_error || 'N/A'}</span></td>`;
-                }
-                
-                // レイテンシ
-                if (latency) {
-                    html += `<td class="${latency === minLatency ? 'best-score' : ''}">`;
-                    html += `<span class="metric-value">${latency.toFixed(2)}</span>`;
-                    html += `<br><span style="font-size:10px; color:#666">${bench.network.latency_min_ms.toFixed(2)}-${bench.network.latency_max_ms.toFixed(2)}</span>`;
-                    html += `</td>`;
-                } else {
-                    html += `<td><span style="color:#999; font-size:12px">${bench?.network?.latency_error || 'N/A'}</span></td>`;
-                }
-                
-                // DNS
-                if (dns) {
-                    html += `<td class="${dns === minDNS ? 'best-score' : ''}">`;
-                    html += `<span class="metric-value">${dns.toFixed(2)}</span>`;
-                    html += `<br><span style="font-size:10px; color:#666">${bench.network.dns_min_ms.toFixed(2)}-${bench.network.dns_max_ms.toFixed(2)}</span>`;
-                    html += `</td>`;
-                } else {
-                    html += `<td><span style="color:#999; font-size:12px">${bench?.network?.dns_error || 'N/A'}</span></td>`;
-                }
                 
                 const date = new Date(server.timestamp);
                 html += `<td style="font-size: 12px;">${date.toLocaleString()}</td>`;
